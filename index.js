@@ -1,19 +1,22 @@
 'use strict';
 var url = require('url');
 var assert = require('assert');
-var http = require('http');
-var https = require('https');
 var Writable = require('stream').Writable;
 var debug = require('debug')('follow-redirects');
 
-var nativeProtocols = {'http:': http, 'https:': https};
-var schemes = {};
-var exports = module.exports = {
-	maxRedirects: 21
+// Export the native HTTP and HTTPS protocols by default
+var DEFAULT_PROTOCOLS = {
+	http: require('http'),
+	https: require('https')
 };
 // RFC7231§4.2.1: Of the request methods defined by this specification,
 // the GET, HEAD, OPTIONS, and TRACE methods are defined to be safe.
-var safeMethods = {GET: true, HEAD: true, OPTIONS: true, TRACE: true};
+var SAFE_METHODS = {GET: true, HEAD: true, OPTIONS: true, TRACE: true};
+
+// Default settings
+var exports = module.exports = {
+	maxRedirects: 21
+};
 
 // Create handlers that pass events from native requests
 var eventHandlers = Object.create(null);
@@ -60,15 +63,17 @@ RedirectableRequest.prototype = Object.create(Writable.prototype);
 
 // Executes the next native request (initial or redirect)
 RedirectableRequest.prototype._performRequest = function () {
+	var protocol = this._options.protocol;
+	var scheme = protocol.substr(0, protocol.length - 1);
+
 	// If specified, use the agent corresponding to the protocol
 	// (HTTP and HTTPS use different types of agents)
-	var protocol = this._options.protocol;
 	if (this._options.agents) {
-		this._options.agent = this._options.agents[schemes[protocol]];
+		this._options.agent = this._options.agents[scheme];
 	}
 
 	// Create the native request
-	var nativeProtocol = nativeProtocols[protocol];
+	var nativeProtocol = this._options.nativeProtocols[scheme];
 	var request = this._currentRequest =
 				nativeProtocol.request(this._options, this._onNativeResponse);
 	this._currentUrl = url.format(this._options);
@@ -130,7 +135,7 @@ RedirectableRequest.prototype._processResponse = function (response) {
 		// if it performs an automatic redirection to that URI.
 		var header;
 		var headers = this._options.headers;
-		if (response.statusCode !== 307 && !(this._options.method in safeMethods)) {
+		if (response.statusCode !== 307 && !(this._options.method in SAFE_METHODS)) {
 			this._options.method = 'GET';
 			// Drop a possible entity and headers related to it
 			this._bufferedWrites = [];
@@ -206,33 +211,42 @@ RedirectableRequest.prototype.end = function (data, encoding, callback) {
 	}
 };
 
-// Export a redirecting wrapper for each native protocol
-Object.keys(nativeProtocols).forEach(function (protocol) {
-	var scheme = schemes[protocol] = protocol.substr(0, protocol.length - 1);
-	var nativeProtocol = nativeProtocols[protocol];
-	var wrappedProtocol = exports[scheme] = Object.create(nativeProtocol);
+// Wraps the key/value object of protocols with redirect functionality
+function wrap(nativeProtocols) {
+	var wrappedProtocols = {};
+	Object.keys(nativeProtocols).forEach(function (scheme) {
+		var protocol = scheme + ':';
+		var nativeProtocol = nativeProtocols[scheme];
+		var wrappedProtocol = wrappedProtocols[scheme] = Object.create(nativeProtocol);
 
-	// Executes an HTTP request, following redirects
-	wrappedProtocol.request = function (options, callback) {
-		if (typeof options === 'string') {
-			options = url.parse(options);
-			options.maxRedirects = exports.maxRedirects;
-		} else {
-			options = Object.assign({
-				maxRedirects: exports.maxRedirects,
-				protocol: protocol
-			}, options);
-		}
-		assert.equal(options.protocol, protocol, 'protocol mismatch');
-		debug('options', options);
+		// Executes a request, following redirects
+		wrappedProtocol.request = function (options, callback) {
+			if (typeof options === 'string') {
+				options = url.parse(options);
+				options.maxRedirects = exports.maxRedirects;
+			} else {
+				options = Object.assign({
+					maxRedirects: exports.maxRedirects,
+					protocol: protocol
+				}, options);
+			}
+			options.nativeProtocols = nativeProtocols;
+			assert.equal(options.protocol, protocol, 'protocol mismatch');
+			debug('options', options);
 
-		return new RedirectableRequest(options, callback);
-	};
+			return new RedirectableRequest(options, callback);
+		};
 
-	// Executes a GET request, following redirects
-	wrappedProtocol.get = function (options, callback) {
-		var request = wrappedProtocol.request(options, callback);
-		request.end();
-		return request;
-	};
-});
+		// Executes a GET request, following redirects
+		wrappedProtocol.get = function (options, callback) {
+			var request = wrappedProtocol.request(options, callback);
+			request.end();
+			return request;
+		};
+	});
+	return wrappedProtocols;
+}
+
+// Exports
+module.exports.wrap = wrap;
+Object.assign(module.exports, wrap(DEFAULT_PROTOCOLS));
