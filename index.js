@@ -56,7 +56,7 @@ function RedirectableRequest(options, responseCallback) {
 	// Perform the first request
 	this._performRequest();
 }
-RedirectableRequest.prototype = Object.create(Writable.prototype);
+Object.setPrototypeOf(RedirectableRequest, Object.create(Writable.prototype));
 
 // Executes the next native request (initial or redirect)
 RedirectableRequest.prototype._performRequest = function () {
